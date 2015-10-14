@@ -4,6 +4,7 @@ import datetime
 import tempfile
 
 import boto
+import codecs
 
 from tornado import web
 
@@ -174,7 +175,7 @@ class S3ContentsManager(ContentsManager):
                         k.get_file(t)
                         t.seek(0)
                         # read with utf-8 encoding
-                        with codecs.open(t.name, mode='r', encoding='utf-8') as f:
+                        with self._codecs_open(t.name, t, mode='r', encoding='utf-8') as f:
                             nb = nbformat.read(f, as_version=4)
                 except Exception as e:
                     raise web.HTTPError(400, u"Unreadable Notebook: %s %s" % (path, e))
@@ -287,13 +288,42 @@ class S3ContentsManager(ContentsManager):
         k.key = self._path_to_s3_key(path)
 
         try:
-            with tempfile.NamedTemporaryFile() as t, codecs.open(t.name, mode='w', encoding='utf-8') as f:
-                # write tempfile with utf-8 encoding
-                nbformat.write(nb, f, version=nbformat.NO_CONVERT)
-                # upload as bytes (t's fp didn't advance)
-                k.set_contents_from_file(t)
+            with tempfile.NamedTemporaryFile() as t:
+                with self._codecs_open(t.name, t, mode='w', encoding='utf-8') as f:
+                    # write tempfile with utf-8 encoding
+                    nbformat.write(nb, f, version=nbformat.NO_CONVERT)
+                    # upload as bytes (t's fp didn't advance)
+                    t.seek(0)
+                    k.set_contents_from_file(t)
         except Exception as e:
             raise web.HTTPError(400, u"Unexpected Error Writing Notebook: %s %s" % (path, e))
+
+    def _codecs_open(self, filename, file_handle, mode='rb', encoding=None, errors='strict', buffering=1):
+        # Copy of codecs.open
+        # Seems that NamedTemporaryFiles under Windows are opened automatically.
+        # This causes issues when codec.open is then used to open the file in the IPython V3 code.
+        # Changed the code to use the following method as opposed to codecs_open in the save and get methods.
+        # See https://bugs.python.org/issue14243
+        if encoding is not None:
+            if 'U' in mode:
+                # No automatic conversion of '\n' is done on reading and writing
+                mode = mode.strip().replace('U', '')
+                if mode[:1] not in set('rwa'):
+                    mode = 'r' + mode
+            if 'b' not in mode:
+                # Force opening of the file in binary mode
+                mode = mode + 'b'
+        try:
+            file = open(filename, mode, buffering)
+        except:
+            file = file_handle
+        if encoding is None:
+            return file
+        info = codecs.lookup(encoding)
+        srw = codecs.StreamReaderWriter(file, info.streamreader, info.streamwriter, errors)
+        # Add attributes to simplify introspection
+        srw.encoding = encoding
+        return srw
 
     def rename(self, old_path, new_path):
         self.log.debug('rename: %s', locals())
